@@ -622,7 +622,7 @@ extension OpenWearablesHealthSDK {
             "zoneOffset": _zoneOffsetString(metadata: c.metadata, date: c.startDate),
             "source": _mapSource(c.sourceRevision, device: c.device),
             "values": NSNull(),
-            "metadata": NSNull()
+            "metadata": _metadataDict(c.metadata)
         ]
     }
 
@@ -669,7 +669,7 @@ extension OpenWearablesHealthSDK {
             "laps": _buildWorkoutLaps(w, dateFormatter: dateFormatter),
             "route": NSNull(),
             "samples": NSNull(),
-            "metadata": NSNull()
+            "metadata": _metadataDict(w.metadata)
         ]
     }
     
@@ -821,15 +821,47 @@ extension OpenWearablesHealthSDK {
     
     // MARK: - Source mapper (unified format)
     
-    private func _mapSource(_ sourceRevision: HKSourceRevision, device: HKDevice?) -> [String: Any] {
+    /// A JSON value for an optional string: the string itself, or `NSNull` when absent.
+    ///
+    /// Written out rather than `x as Any? ?? NSNull()`, which looks equivalent and is not
+    /// for a doubly-optional value. `device?.name` is `String??` (an optional device
+    /// holding an optional name), and when the device exists but the field is empty the
+    /// outer optional is non-nil, so `??` never fires and a wrapped `nil` reaches
+    /// `JSONSerialization` - which rejects it and fails the whole upload.
+    internal func _jsonOrNull(_ value: String?) -> Any {
+        if let value = value { return value }
+        return NSNull()
+    }
+
+    internal func _mapSource(_ sourceRevision: HKSourceRevision, device: HKDevice?) -> [String: Any] {
+        // The unit that recorded the sample, when HealthKit names one. A paired
+        // Bluetooth peripheral - a chest strap, a power meter, PPG earbuds - arrives as
+        // an HKDevice built from its BLE Device Information Service, so this is the only
+        // field that ever names it.
+        let deviceModel = device.flatMap { $0.model }
+        // The hardware that ran the writing app, which is not the same claim. For a
+        // first-party sample they coincide; for anything relayed through the phone the
+        // productType names the phone, and every app on that handset reports the same
+        // string. Sent under its own key so the backend can tell "what recorded this"
+        // from "what synced this" instead of having to guess which one a single
+        // `deviceModel` field meant.
+        let productType = sourceRevision.productType
+        // HKDevice.localIdentifier, else the UDI. Per-unit and stable enough to tell two
+        // identical watches on one account apart, which nothing else on this route does.
+        // Not guaranteed to survive a restore or a re-pair; a changed value costs a split
+        // (a new device appears and someone merges it), which is the recoverable
+        // direction.
+        let deviceId = device.flatMap { $0.localIdentifier ?? $0.udiDeviceIdentifier }
+
         var result: [String: Any] = [
             "appId": sourceRevision.source.bundleIdentifier,
             "name": sourceRevision.source.name,
-            "deviceId": NSNull(),
-            "deviceName": (device?.name) as Any? ?? NSNull(),
-            "deviceManufacturer": (device?.manufacturer) as Any? ?? NSNull(),
-            "deviceModel": (sourceRevision.productType) as Any? ?? NSNull(),
-            "deviceType": _inferDeviceType(productType: sourceRevision.productType, device: device),
+            "deviceId": _jsonOrNull(deviceId),
+            "deviceName": _jsonOrNull(device.flatMap { $0.name }),
+            "deviceManufacturer": _jsonOrNull(device.flatMap { $0.manufacturer }),
+            "deviceModel": _jsonOrNull(deviceModel),
+            "productType": _jsonOrNull(productType),
+            "deviceType": _inferDeviceType(productType: productType, device: device),
             "recordingMethod": NSNull()
         ]
 
@@ -845,18 +877,54 @@ extension OpenWearablesHealthSDK {
 
         return result
     }
-    
-    private func _inferDeviceType(productType: String?, device: HKDevice?) -> Any {
-        if let pt = productType?.lowercased() {
-            if pt.contains("watch") { return "watch" }
-            if pt.contains("iphone") { return "phone" }
-            if pt.contains("ipad") { return "phone" }
-        }
-        if let name = device?.name?.lowercased() {
-            if name.contains("watch") { return "watch" }
-            if name.contains("iphone") { return "phone" }
-        }
+
+    /// What kind of hardware recorded this sample, where the strings allow an answer.
+    ///
+    /// The HKDevice is consulted first and the productType only when there is none.
+    /// HealthKit has no device-category field, so everything here is inference over
+    /// names - but inference over the *recorder's* name is a different quality of
+    /// evidence from inference over the phone's. Taking productType first answered
+    /// "phone" for every relayed stream, which is true of the carrier and says nothing
+    /// about the ring, strap or headband that took the reading.
+    ///
+    /// `NSNull` where nothing matches, never a guess. A wrong type outranks a real one
+    /// downstream; an absent one lets the backend fall back to what it already knows.
+    internal func _inferDeviceType(productType: String?, device: HKDevice?) -> Any {
+        if let recorder = _deviceTypeFromName(device.flatMap { $0.model }) { return recorder }
+        if let recorder = _deviceTypeFromName(device.flatMap { $0.name }) { return recorder }
+        // No device record at all: the productType is the only hardware string there is.
+        // It describes the host, which for a first-party sample is also the recorder.
+        if device == nil, let host = _deviceTypeFromName(productType) { return host }
         return NSNull()
+    }
+
+    /// Maps a hardware name onto the backend's device-type vocabulary, or nil.
+    private func _deviceTypeFromName(_ raw: String?) -> String? {
+        guard let name = raw?.lowercased(), !name.isEmpty else { return nil }
+
+        // Chest straps before the generic passes: "HRM-Pro" and "H10" name no body part,
+        // and an ECG strap is the reference instrument a wrist sensor gets compared to.
+        if name.contains("chest") { return "chest_strap" }
+        for token in name.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+            if ["h7", "h9", "h10", "hrm", "tickr"].contains(String(token)) { return "chest_strap" }
+            if token.hasPrefix("hrm") { return "chest_strap" }
+        }
+
+        // Head-mounted before "band": "Muse S Headband" is not a wrist band.
+        if name.contains("airpod") || name.contains("earbud") || name.contains("powerbeats") {
+            return "head_mounted"
+        }
+        if name.contains("muse") || name.contains("headband") || name.contains("eeg") {
+            return "head_mounted"
+        }
+
+        if name.contains("watch") { return "watch" }
+        if name.contains("ring") { return "ring" }
+        if name.contains("band") { return "fitness_band" }
+        if name.contains("scale") { return "scale" }
+        if name.contains("iphone") || name.contains("ipad") { return "phone" }
+
+        return nil
     }
     
     // MARK: - Metadata (unified: dict or null)
