@@ -92,6 +92,23 @@ final class OpenWearablesHealthSDKTests: XCTestCase {
         )
     }
 
+    func testHRVTypesMapToHealthKit() {
+        XCTAssertEqual(HealthDataType.heartRateVariabilityRMSSD.rawValue, "heartRateVariabilityRMSSD")
+        XCTAssertEqual(
+            HealthDataType.heartRateVariabilitySDNN.toHKSampleType()?.identifier,
+            HKQuantityTypeIdentifier.heartRateVariabilitySDNN.rawValue
+        )
+
+        if #available(iOS 27.0, *) {
+            XCTAssertEqual(
+                HealthDataType.heartRateVariabilityRMSSD.toHKSampleType()?.identifier,
+                "HKQuantityTypeIdentifierHeartRateVariabilityRMSSD"
+            )
+        } else {
+            XCTAssertNil(HealthDataType.heartRateVariabilityRMSSD.toHKSampleType())
+        }
+    }
+
     func testCyclingTypesMapToHealthKit() {
         XCTAssertEqual(HealthDataType.cyclingPower.rawValue, "cyclingPower")
         XCTAssertEqual(HealthDataType.cyclingCadence.rawValue, "cyclingCadence")

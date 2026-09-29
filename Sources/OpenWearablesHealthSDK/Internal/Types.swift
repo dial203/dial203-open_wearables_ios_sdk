@@ -30,6 +30,8 @@ public enum HealthDataType: String, CaseIterable, Sendable {
     case heartRate
     case restingHeartRate
     case heartRateVariabilitySDNN
+    // iOS 27.0+
+    case heartRateVariabilityRMSSD
     case vo2Max
     case oxygenSaturation
     case respiratoryRate
@@ -121,6 +123,11 @@ public enum HealthDataType: String, CaseIterable, Sendable {
             return HKObjectType.quantityType(forIdentifier: .restingHeartRate)
         case .heartRateVariabilitySDNN:
             return HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN)
+        case .heartRateVariabilityRMSSD:
+            if #available(iOS 27.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .owHeartRateVariabilityRMSSD)
+            }
+            return nil
         case .vo2Max:
             return HKObjectType.quantityType(forIdentifier: .vo2Max)
         case .oxygenSaturation, .bloodOxygen:
@@ -228,6 +235,17 @@ public enum HealthDataType: String, CaseIterable, Sendable {
             return nil
         }
     }
+}
+
+extension HKQuantityTypeIdentifier {
+    /// `.heartRateVariabilityRMSSD` (iOS 27.0+), spelled as its raw value so the SDK
+    /// still builds with an Xcode whose iOS SDK predates it.
+    ///
+    /// It needs its own `_defaultUnit` entry: without one it falls through to `.count()`,
+    /// which is incompatible with milliseconds, and `doubleValue(for:)` raises.
+    static let owHeartRateVariabilityRMSSD = HKQuantityTypeIdentifier(
+        rawValue: "HKQuantityTypeIdentifierHeartRateVariabilityRMSSD"
+    )
 }
 
 extension OpenWearablesHealthSDK {
@@ -438,6 +456,11 @@ extension OpenWearablesHealthSDK {
         case HKObjectType.quantityType(forIdentifier: .dietaryWater):
             return (.liter(), "L")
         default:
+            // Matched on the identifier string, so a device on iOS 26 or earlier never
+            // asks HealthKit for a quantity type it does not have.
+            if qt.identifier == HKQuantityTypeIdentifier.owHeartRateVariabilityRMSSD.rawValue {
+                return (.secondUnit(with: .milli), "ms")
+            }
             if #available(iOS 16.0, *) {
                 if qt == HKObjectType.quantityType(forIdentifier: .runningPower) {
                     return (.watt(), "W")
