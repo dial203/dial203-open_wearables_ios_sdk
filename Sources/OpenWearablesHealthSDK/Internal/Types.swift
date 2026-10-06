@@ -25,16 +25,21 @@ public enum HealthDataType: String, CaseIterable, Sendable {
     case sixMinuteWalkTestDistance
     case activeEnergy
     case basalEnergy
+    /// Minutes Apple Watch counted toward the Exercise ring (iOS 9.3+).
+    case appleExerciseTime
     
     // Heart & Cardiovascular
     case heartRate
     case restingHeartRate
     case heartRateVariabilitySDNN
-    // iOS 27.0+
-    case heartRateVariabilityRMSSD
+    case heartRateVariabilityRMSSD // iOS 27.0+
     case vo2Max
     case oxygenSaturation
     case respiratoryRate
+    /// Average heart rate while walking, one sample per day (iOS 11+).
+    case walkingHeartRateAverage
+    /// Heart rate drop one minute after a workout ends (iOS 16+).
+    case heartRateRecoveryOneMinute
     
     // Body Measurements
     case bodyMass
@@ -44,6 +49,9 @@ public enum HealthDataType: String, CaseIterable, Sendable {
     case leanBodyMass
     case waistCircumference
     case bodyTemperature
+    /// Overnight wrist-temperature samples recorded by Apple Watch (Series 8 and later, iOS 16+).
+    /// Distinct from `bodyTemperature`, which carries manual thermometer readings.
+    case appleSleepingWristTemperature
     
     // Blood & Metabolic
     case bloodGlucose
@@ -55,6 +63,8 @@ public enum HealthDataType: String, CaseIterable, Sendable {
     // Sleep & Mindfulness
     case sleep
     case mindfulSession
+    /// Nightly breathing disturbances Apple derives from the sleep session (iOS 18+).
+    case appleSleepingBreathingDisturbances
     
     // Reproductive Health
     case menstrualFlow
@@ -86,6 +96,8 @@ public enum HealthDataType: String, CaseIterable, Sendable {
     // Workout Effort (iOS 18.0+ / watchOS 11.0+)
     case workoutEffortScore
     case estimatedWorkoutEffortScore
+    /// Metabolic intensity Apple estimates during a workout, in kcal/(hr·kg) (iOS 17.0+).
+    case physicalEffort
 
     // Aliases (alternative names for the same underlying type)
     case restingEnergy
@@ -117,6 +129,8 @@ public enum HealthDataType: String, CaseIterable, Sendable {
             return HKObjectType.quantityType(forIdentifier: .activeEnergyBurned)
         case .basalEnergy, .restingEnergy:
             return HKObjectType.quantityType(forIdentifier: .basalEnergyBurned)
+        case .appleExerciseTime:
+            return HKObjectType.quantityType(forIdentifier: .appleExerciseTime)
         case .heartRate:
             return HKObjectType.quantityType(forIdentifier: .heartRate)
         case .restingHeartRate:
@@ -124,9 +138,13 @@ public enum HealthDataType: String, CaseIterable, Sendable {
         case .heartRateVariabilitySDNN:
             return HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN)
         case .heartRateVariabilityRMSSD:
+            // The identifier only exists in the iOS 27 SDK, so older Xcode versions
+            // compile this type out instead of failing the build.
+            #if compiler(>=6.4)
             if #available(iOS 27.0, *) {
-                return HKObjectType.quantityType(forIdentifier: .owHeartRateVariabilityRMSSD)
+                return HKObjectType.quantityType(forIdentifier: .heartRateVariabilityRMSSD)
             }
+            #endif
             return nil
         case .vo2Max:
             return HKObjectType.quantityType(forIdentifier: .vo2Max)
@@ -134,6 +152,13 @@ public enum HealthDataType: String, CaseIterable, Sendable {
             return HKObjectType.quantityType(forIdentifier: .oxygenSaturation)
         case .respiratoryRate:
             return HKObjectType.quantityType(forIdentifier: .respiratoryRate)
+        case .walkingHeartRateAverage:
+            return HKObjectType.quantityType(forIdentifier: .walkingHeartRateAverage)
+        case .heartRateRecoveryOneMinute:
+            if #available(iOS 16.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .heartRateRecoveryOneMinute)
+            }
+            return nil
         case .bodyMass:
             return HKObjectType.quantityType(forIdentifier: .bodyMass)
         case .height:
@@ -151,6 +176,16 @@ public enum HealthDataType: String, CaseIterable, Sendable {
             return nil
         case .bodyTemperature:
             return HKObjectType.quantityType(forIdentifier: .bodyTemperature)
+        case .appleSleepingWristTemperature:
+            if #available(iOS 16.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .appleSleepingWristTemperature)
+            }
+            return nil
+        case .appleSleepingBreathingDisturbances:
+            if #available(iOS 18.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .appleSleepingBreathingDisturbances)
+            }
+            return nil
         case .bloodGlucose:
             return HKObjectType.quantityType(forIdentifier: .bloodGlucose)
         case .insulinDelivery:
@@ -233,19 +268,13 @@ public enum HealthDataType: String, CaseIterable, Sendable {
                 return HKObjectType.quantityType(forIdentifier: .estimatedWorkoutEffortScore)
             }
             return nil
+        case .physicalEffort:
+            if #available(iOS 17.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .physicalEffort)
+            }
+            return nil
         }
     }
-}
-
-extension HKQuantityTypeIdentifier {
-    /// `.heartRateVariabilityRMSSD` (iOS 27.0+), spelled as its raw value so the SDK
-    /// still builds with an Xcode whose iOS SDK predates it.
-    ///
-    /// It needs its own `_defaultUnit` entry: without one it falls through to `.count()`,
-    /// which is incompatible with milliseconds, and `doubleValue(for:)` raises.
-    static let owHeartRateVariabilityRMSSD = HKQuantityTypeIdentifier(
-        rawValue: "HKQuantityTypeIdentifierHeartRateVariabilityRMSSD"
-    )
 }
 
 extension OpenWearablesHealthSDK {
@@ -334,7 +363,22 @@ extension OpenWearablesHealthSDK {
 
     // MARK: - Units / helpers
 
+    /// Both temperature identifiers share a unit; `appleSleepingWristTemperature` is iOS 16+, so the
+    /// match is by identifier rather than by a `case` in the switches below.
+    private func _isTemperatureQuantityType(_ qt: HKQuantityType) -> Bool {
+        if qt.identifier == HKQuantityTypeIdentifier.bodyTemperature.rawValue {
+            return true
+        }
+        if #available(iOS 16.0, *) {
+            return qt.identifier == HKQuantityTypeIdentifier.appleSleepingWristTemperature.rawValue
+        }
+        return false
+    }
+
     private func _getFallbackUnit(for qt: HKQuantityType) -> HKUnit {
+        if _isTemperatureQuantityType(qt) {
+            return .degreeCelsius()
+        }
         switch qt {
         case HKObjectType.quantityType(forIdentifier: .stepCount):
             return .count()
@@ -386,11 +430,21 @@ extension OpenWearablesHealthSDK {
                     return .appleEffortScore()
                 }
             }
+            #if compiler(>=6.4)
+            if #available(iOS 27.0, *) {
+                if qt == HKObjectType.quantityType(forIdentifier: .heartRateVariabilityRMSSD) {
+                    return .secondUnit(with: .milli)
+                }
+            }
+            #endif
             return .count()
         }
     }
 
     private func _defaultUnit(for qt: HKQuantityType) -> (HKUnit, String) {
+        if _isTemperatureQuantityType(qt) {
+            return (.degreeCelsius(), "degC")
+        }
         switch qt {
         case HKObjectType.quantityType(forIdentifier: .stepCount):
             return (.count(), "count")
@@ -398,6 +452,10 @@ extension OpenWearablesHealthSDK {
             return (.count().unitDivided(by: .minute()), "bpm")
         case HKObjectType.quantityType(forIdentifier: .restingHeartRate):
             return (.count().unitDivided(by: .minute()), "bpm")
+        case HKObjectType.quantityType(forIdentifier: .walkingHeartRateAverage):
+            return (.count().unitDivided(by: .minute()), "bpm")
+        case HKObjectType.quantityType(forIdentifier: .appleExerciseTime):
+            return (.minute(), "min")
         case HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN):
             return (.secondUnit(with: .milli), "ms")
         case HKObjectType.quantityType(forIdentifier: .basalEnergyBurned),
@@ -456,14 +514,12 @@ extension OpenWearablesHealthSDK {
         case HKObjectType.quantityType(forIdentifier: .dietaryWater):
             return (.liter(), "L")
         default:
-            // Matched on the identifier string, so a device on iOS 26 or earlier never
-            // asks HealthKit for a quantity type it does not have.
-            if qt.identifier == HKQuantityTypeIdentifier.owHeartRateVariabilityRMSSD.rawValue {
-                return (.secondUnit(with: .milli), "ms")
-            }
             if #available(iOS 16.0, *) {
                 if qt == HKObjectType.quantityType(forIdentifier: .runningPower) {
                     return (.watt(), "W")
+                }
+                if qt == HKObjectType.quantityType(forIdentifier: .heartRateRecoveryOneMinute) {
+                    return (.count().unitDivided(by: .minute()), "bpm")
                 }
                 if qt == HKObjectType.quantityType(forIdentifier: .runningVerticalOscillation) {
                     return (.meterUnit(with: .centi), "cm")
@@ -483,13 +539,29 @@ extension OpenWearablesHealthSDK {
                 if qt == HKObjectType.quantityType(forIdentifier: .cyclingSpeed) {
                     return (.meter().unitDivided(by: .second()), "m/s")
                 }
+                if qt == HKObjectType.quantityType(forIdentifier: .physicalEffort) {
+                    return (
+                        .kilocalorie().unitDivided(by: .hour()).unitDivided(by: .gramUnit(with: .kilo)),
+                        "kcal/hr/kg"
+                    )
+                }
             }
             if #available(iOS 18.0, *) {
                 if qt == HKObjectType.quantityType(forIdentifier: .workoutEffortScore)
                     || qt == HKObjectType.quantityType(forIdentifier: .estimatedWorkoutEffortScore) {
                     return (.appleEffortScore(), "appleEffortScore")
                 }
+                if qt == HKObjectType.quantityType(forIdentifier: .appleSleepingBreathingDisturbances) {
+                    return (.count(), "count")
+                }
             }
+            #if compiler(>=6.4)
+            if #available(iOS 27.0, *) {
+                if qt == HKObjectType.quantityType(forIdentifier: .heartRateVariabilityRMSSD) {
+                    return (.secondUnit(with: .milli), "ms")
+                }
+            }
+            #endif
             return (.count(), "count")
         }
     }
